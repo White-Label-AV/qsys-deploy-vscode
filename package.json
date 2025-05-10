@@ -2,7 +2,7 @@
   "name": "qsys-deploy-vscode",
   "displayName": "Q-SYS Lua Script Deployment",
   "description": "Deploy Lua scripts to Q-SYS Core or Designer",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "WhiteLabelAV",
   "repository": {
     "type": "git",

@@ -258,7 +258,7 @@ class QrcClient {
             };
             
             this.outputChannel.appendLine(`Setting script for component "${componentName}" with params: ${JSON.stringify(params)}`);
-            await this.sendCommand('Component.Set', [params]);
+            await this.sendCommand('Component.Set', params);
         } catch (err) {
             this.outputChannel.appendLine(`Error setting script: ${err}`);
             throw new Error(`Failed to set script: ${err}`);
@@ -275,7 +275,7 @@ class QrcClient {
             };
             
             this.outputChannel.appendLine(`Getting script from component "${componentName}"`);
-            const result = await this.sendCommand('Component.Get', [params]);
+            const result = await this.sendCommand('Component.Get', params);
             
             // Extract the script content from the response
             if (result && result.Controls && result.Controls.length > 0) {
@@ -393,7 +393,7 @@ export function activate(context: vscode.ExtensionContext) {
             
             outputChannel.appendLine(`Found component "${componentName}" with type "${matchedComponent.Type}"`);
             
-            const validTypes = ['device_controller_script', 'control_script_2', 'scriptable_controls'];
+            const validTypes = ['device_controller_script', 'control_script_2', 'scriptable_controls', 'device_controller_proxy'];
             if (!validTypes.includes(matchedComponent.Type)) {
                 outputChannel.appendLine(`Component type "${matchedComponent.Type}" is not valid. Valid types: ${validTypes.join(', ')}`);
                 vscode.window.showErrorMessage(`Component "${componentName}" is not a valid script component type. Must be one of: ${validTypes.join(', ')}`);
