@@ -7,8 +7,6 @@ This extension allows you to edit Lua scripts in VS Code that are designed to ru
 - **Multi-Core Deployment**: Deploy scripts to multiple Q-SYS Cores simultaneously with optimized connection pooling
 - **Quick Deploy**: Fast deployment to pre-configured targets with a single keyboard shortcut
 - **Interactive Selection**: Choose specific cores and components when deploying with multi-select support
-- **Connection Optimization**: Intelligent connection pooling and timeout handling for reliable deployments
-- **Auto-Deploy**: Automatically deploy scripts on save (configurable per script or globally)
 - **Component Validation**: Validate component types before deployment to prevent errors
 - **Authentication Support**: Connect to cores with username/password authentication
 - **Comprehensive Logging**: Detailed debug output for troubleshooting deployments
@@ -54,7 +52,7 @@ All shortcuts work when editing Lua files.
 
 - Visual Studio Code 1.75.0 or higher
 - A running Q-SYS Core or Q-SYS Designer in emulation mode
-- Text Controller components that have script access set to "External" or "All"
+- Text Controller, Control Script, UCI Script, or Scriptable Controls (legacy) components that have script access set to "External" or "All"
 
 ## Extension Settings
 
@@ -94,7 +92,6 @@ This extension contributes the following settings:
       }
     ],
     "connectionTimeout": 15000,
-    "autoDeployOnSave": false
   }
 }
 ```
@@ -119,7 +116,6 @@ This extension contributes the following settings:
             "quickDeploy": false
           }
         ],
-        "autoDeployOnSave": true
       },
       {
         "filePath": "scripts/utility.lua",
@@ -209,7 +205,6 @@ This extension provides the following commands:
 
 - Use `Ctrl+Alt+Q` for quick deployment to development targets
 - Use `Ctrl+Alt+Shift+D` to deploy to all configured targets at once
-- Enable per-script auto-deploy with `autoDeployOnSave: true` in script configuration
 
 ### Backward Compatibility
 
@@ -232,31 +227,13 @@ This extension provides the following commands:
 2. Press `Ctrl+Alt+Q` for instant deployment to development cores
 3. Use `Ctrl+Alt+Shift+D` to deploy to all targets when ready for production
 
-### Auto-Deploy Setup
-
-1. Enable `autoDeployOnSave: true` globally or per script
-2. Scripts automatically deploy when saved
-3. Perfect for rapid development iterations
-
-## Connection Optimization and Timeout Handling
-
-### Connection Pooling
-
-- Connections to the same core are reused across multiple deployments
-- Reduces connection overhead when deploying to multiple components
-- Automatic cleanup when deployments complete
+## Timeout Handling
 
 ### Timeout Configuration
 
 - Default timeout: 10 seconds
 - Configurable via `connectionTimeout` setting (1-60 seconds)
 - Graceful handling of timeout errors with clear reporting
-
-### Error Handling
-
-- Failed connections don't stop other deployments
-- Clear distinction between connection failures and deployment failures
-- Comprehensive reporting of successful, failed, and skipped deployments
 
 ## Debugging
 
