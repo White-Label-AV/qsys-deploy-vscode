@@ -10,8 +10,10 @@ interface QSysCore {
 }
 
 interface DeploymentTarget {
-    coreName: string;
+    coreNames?: string[]; // New array format for multiple cores
+    coreName?: string; // Legacy field for backward compatibility
     components: string[];
+    quickDeploy?: boolean;
 }
 
 interface ScriptMapping {
@@ -26,6 +28,43 @@ interface Component {
     Type: string;
 }
 
+// Enhanced error system
+enum ErrorCategory {
+    CONNECTION_TIMEOUT = "Connection Timeout",
+    AUTHENTICATION_FAILED = "Authentication Failed",
+    NETWORK_UNREACHABLE = "Network Unreachable",
+    COMPONENT_NOT_FOUND = "Component Not Found",
+    INVALID_COMPONENT_TYPE = "Invalid Component Type",
+    PERMISSION_DENIED = "Permission Denied",
+    SCRIPT_TOO_LARGE = "Script Too Large",
+    CORE_BUSY = "Core Busy",
+    INVALID_CREDENTIALS = "Invalid Credentials",
+    PORT_BLOCKED = "Port Blocked",
+    CORE_OFFLINE = "Core Offline",
+    SCRIPT_SYNTAX_ERROR = "Script Syntax Error",
+    UNKNOWN_ERROR = "Unknown Error"
+}
+
+interface DeploymentContext {
+    operation: string; // "connecting", "authenticating", "validating", "deploying"
+    core?: QSysCore;
+    component?: string;
+    startTime: Date;
+    attemptNumber: number;
+    filePath?: string;
+}
+
+interface EnhancedError {
+    category: ErrorCategory;
+    title: string;
+    message: string;
+    details: string;
+    suggestions: string[];
+    context: DeploymentContext;
+    originalError?: Error;
+    timestamp: Date;
+}
+
 // QRC Client for communicating with Q-SYS Core
 class QrcClient {
     private socket: net.Socket | null = null;
@@ -33,43 +72,101 @@ class QrcClient {
     private messageId: number = 1;
     private buffer: string = '';
     private outputChannel: vscode.OutputChannel;
+    private connectionTimeout: number;
+    private isConnected: boolean = false;
 
-    constructor(private ip: string, private port: number = 1710, outputChannel: vscode.OutputChannel) {
+    constructor(private ip: string, private port: number = 1710, outputChannel: vscode.OutputChannel, timeout: number = 10000) {
         this.outputChannel = outputChannel;
+        this.connectionTimeout = timeout;
     }
 
-    // Connect to the Q-SYS Core
-    public connect(): Promise<void> {
+    // Connect to the Q-SYS Core with timeout handling and cancellation support
+    public connect(cancellationToken?: DeploymentCancellationToken): Promise<void> {
         return new Promise((resolve, reject) => {
-            this.outputChannel.appendLine(`Connecting to Q-SYS Core at ${this.ip}:${this.port}...`);
+            if (this.isConnected && this.socket) {
+                this.outputChannel.appendLine(`Already connected to Q-SYS Core at ${this.ip}`);
+                resolve();
+                return;
+            }
+
+            // Check if already cancelled
+            if (cancellationToken?.isCancelled) {
+                reject(new Error('Connection cancelled before starting'));
+                return;
+            }
+
+            this.outputChannel.appendLine(`Connecting to Q-SYS Core at ${this.ip}:${this.port} (timeout: ${this.connectionTimeout}ms)...`);
             this.socket = new net.Socket();
+            
+            // Set up connection timeout
+            const timeoutId = setTimeout(() => {
+                this.outputChannel.appendLine(`Connection timeout after ${this.connectionTimeout}ms`);
+                if (this.socket) {
+                    this.socket.destroy();
+                }
+                reject(new Error(`Connection timeout after ${this.connectionTimeout}ms`));
+            }, this.connectionTimeout);
+            
+            // Set up cancellation handler
+            let cancelled = false;
+            const cancelHandler = () => {
+                if (!cancelled) {
+                    cancelled = true;
+                    clearTimeout(timeoutId);
+                    if (this.socket) {
+                        this.socket.destroy();
+                    }
+                    this.isConnected = false;
+                    this.outputChannel.appendLine(`Connection to ${this.ip} cancelled by user`);
+                    reject(new Error('Connection cancelled by user'));
+                }
+            };
+
+            if (cancellationToken) {
+                cancellationToken.onCancelled(cancelHandler);
+            }
             
             // Use a raw buffer to handle binary data properly
             let rawBuffer = Buffer.alloc(0);
             
             this.socket.on('data', (data: Buffer) => {
-                // Log the raw data as hex for debugging
-                this.outputChannel.appendLine(`Received raw data (${data.length} bytes): ${this.bufferToHexString(data)}`);
-                
-                // Append to our raw buffer
-                rawBuffer = Buffer.concat([rawBuffer, data]);
-                
-                // Process the buffer
-                this.processRawBuffer(rawBuffer).then(remainingBuffer => {
-                    rawBuffer = remainingBuffer;
-                });
+                if (!cancelled) {
+                    // Log the raw data as hex for debugging
+                    this.outputChannel.appendLine(`Received raw data (${data.length} bytes): ${this.bufferToHexString(data)}`);
+                    
+                    // Append to our raw buffer
+                    rawBuffer = Buffer.concat([rawBuffer, data]);
+                    
+                    // Process the buffer
+                    this.processRawBuffer(rawBuffer).then(remainingBuffer => {
+                        rawBuffer = remainingBuffer;
+                    });
+                }
             });
             
             this.socket.on('error', (err) => {
-                this.outputChannel.appendLine(`Connection error: ${err.message}`);
-                vscode.window.showErrorMessage(`Q-SYS Connection Error: ${err.message}`);
-                reject(err);
+                if (!cancelled) {
+                    clearTimeout(timeoutId);
+                    this.isConnected = false;
+                    this.outputChannel.appendLine(`Connection error: ${err.message}`);
+                    reject(err);
+                }
+            });
+            
+            this.socket.on('close', () => {
+                if (!cancelled) {
+                    this.isConnected = false;
+                    this.outputChannel.appendLine(`Connection closed to ${this.ip}`);
+                }
             });
             
             this.socket.connect(this.port, this.ip, () => {
-                this.outputChannel.appendLine(`Connected to Q-SYS Core at ${this.ip}`);
-                vscode.window.showInformationMessage(`Connected to Q-SYS Core at ${this.ip}`);
-                resolve();
+                if (!cancelled) {
+                    clearTimeout(timeoutId);
+                    this.isConnected = true;
+                    this.outputChannel.appendLine(`Connected to Q-SYS Core at ${this.ip}`);
+                    resolve();
+                }
             });
         });
     }
@@ -80,6 +177,12 @@ class QrcClient {
             this.socket.destroy();
             this.socket = null;
         }
+        this.isConnected = false;
+    }
+
+    // Check if client is connected
+    public isClientConnected(): boolean {
+        return this.isConnected && this.socket !== null;
     }
     
     // Convert buffer to hex string for debugging
@@ -294,6 +397,133 @@ class QrcClient {
     }
 }
 
+// Connection Pool Manager for reusing connections to the same core
+class ConnectionPoolManager {
+    private connections: Map<string, QrcClient> = new Map();
+    private outputChannel: vscode.OutputChannel;
+    private connectionTimeout: number;
+
+    constructor(outputChannel: vscode.OutputChannel, timeout: number = 10000) {
+        this.outputChannel = outputChannel;
+        this.connectionTimeout = timeout;
+    }
+
+    // Get or create a connection for a core with cancellation support
+    async getConnection(core: QSysCore, cancellationToken?: DeploymentCancellationToken): Promise<QrcClient> {
+        const coreKey = `${core.ip}:${core.name}`;
+        
+        // Check if cancelled before starting
+        cancellationToken?.throwIfCancelled();
+        
+        let client = this.connections.get(coreKey);
+        
+        if (client && client.isClientConnected()) {
+            this.outputChannel.appendLine(`Reusing existing connection to ${core.name} (${core.ip})`);
+            return client;
+        }
+
+        // Create new connection
+        this.outputChannel.appendLine(`Creating new connection to ${core.name} (${core.ip})`);
+        client = new QrcClient(core.ip, 1710, this.outputChannel, this.connectionTimeout);
+        
+        try {
+            await client.connect(cancellationToken);
+            
+            // Check cancellation after connection
+            cancellationToken?.throwIfCancelled();
+            
+            // Authenticate if credentials are provided
+            if (core.username && core.password) {
+                this.outputChannel.appendLine('Authenticating...');
+                await client.login(core.username, core.password);
+                this.outputChannel.appendLine('Authentication successful');
+                
+                // Check cancellation after authentication
+                cancellationToken?.throwIfCancelled();
+            }
+            
+            this.connections.set(coreKey, client);
+            return client;
+        } catch (error) {
+            client.disconnect();
+            throw error;
+        }
+    }
+
+    // Close a specific connection
+    closeConnection(core: QSysCore): void {
+        const coreKey = `${core.ip}:${core.name}`;
+        const client = this.connections.get(coreKey);
+        
+        if (client) {
+            this.outputChannel.appendLine(`Closing connection to ${core.name} (${core.ip})`);
+            client.disconnect();
+            this.connections.delete(coreKey);
+        }
+    }
+
+    // Close all connections
+    closeAllConnections(): void {
+        this.outputChannel.appendLine('Closing all connections...');
+        for (const [coreKey, client] of this.connections) {
+            client.disconnect();
+        }
+        this.connections.clear();
+    }
+
+    // Get connection count
+    getConnectionCount(): number {
+        return this.connections.size;
+    }
+}
+
+// Deployment cancellation token for stopping deployments
+class DeploymentCancellationToken {
+    private _isCancelled: boolean = false;
+    private _onCancelledCallbacks: (() => void)[] = [];
+    
+    get isCancelled(): boolean {
+        return this._isCancelled;
+    }
+    
+    cancel(): void {
+        if (!this._isCancelled) {
+            this._isCancelled = true;
+            this._onCancelledCallbacks.forEach(callback => {
+                try {
+                    callback();
+                } catch (error) {
+                    console.error('Error in cancellation callback:', error);
+                }
+            });
+        }
+    }
+    
+    onCancelled(callback: () => void): void {
+        this._onCancelledCallbacks.push(callback);
+        if (this._isCancelled) {
+            callback();
+        }
+    }
+    
+    throwIfCancelled(): void {
+        if (this._isCancelled) {
+            throw new Error('Operation was cancelled');
+        }
+    }
+}
+
+// Deployment result interface
+interface DeploymentResult {
+    success: boolean;
+    core: QSysCore;
+    componentName: string;
+    error?: string;
+    skipped?: boolean;
+    skipReason?: string;
+    cancelled?: boolean;
+}
+
 // Extension activation
 export function activate(context: vscode.ExtensionContext) {
     console.log('Q-SYS Deploy extension is now active');
@@ -316,15 +546,54 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(showDebugOutputCommand);
     
-// Get extension settings
+// Get extension settings with backward compatibility migration
     function getSettings() {
         const config = vscode.workspace.getConfiguration('qsys-deploy');
+        const rawScripts = config.get<ScriptMapping[]>('scripts', []);
+        
+        // Migrate legacy coreName to coreNames array
+        const migratedScripts = rawScripts.map(script => ({
+            ...script,
+            targets: script.targets.map(target => {
+                // If target has legacy coreName but no coreNames, migrate it
+                if (target.coreName && !target.coreNames) {
+                    return {
+                        ...target,
+                        coreNames: [target.coreName],
+                        // Keep coreName for backward compatibility but mark as legacy
+                        coreName: target.coreName
+                    };
+                }
+                // If target has both, ensure coreNames takes precedence
+                if (target.coreNames && target.coreNames.length > 0) {
+                    return {
+                        ...target,
+                        coreNames: target.coreNames
+                    };
+                }
+                // If target only has coreNames, use as-is
+                return target;
+            })
+        }));
+        
         return {
             autoDeployOnSave: config.get<boolean>('autoDeployOnSave', false),
             cores: config.get<QSysCore[]>('cores', []),
-            scripts: config.get<ScriptMapping[]>('scripts', [])
+            scripts: migratedScripts,
+            connectionTimeout: config.get<number>('connectionTimeout', 10000)
         };
     }
+
+    // Create connection pool manager
+    const settings = getSettings();
+    const connectionPool = new ConnectionPoolManager(outputChannel, settings.connectionTimeout);
+    
+    // Clean up connections when extension is deactivated
+    context.subscriptions.push({
+        dispose: () => {
+            connectionPool.closeAllConnections();
+        }
+    });
     
     // Update status bar
     function updateStatusBar(connected: boolean, coreName?: string) {
@@ -356,12 +625,17 @@ export function activate(context: vscode.ExtensionContext) {
         const targets: Array<{ core: QSysCore, componentNames: string[] }> = [];
         
         for (const target of scriptMapping.targets) {
-            const core = settings.cores.find(c => c.name === target.coreName);
-            if (core) {
-                targets.push({
-                    core,
-                    componentNames: target.components
-                });
+            // Handle both new coreNames array and legacy coreName
+            const coreNamesToProcess = target.coreNames || (target.coreName ? [target.coreName] : []);
+            
+            for (const coreName of coreNamesToProcess) {
+                const core = settings.cores.find(c => c.name === coreName);
+                if (core) {
+                    targets.push({
+                        core,
+                        componentNames: target.components
+                    });
+                }
             }
         }
         
@@ -372,40 +646,79 @@ export function activate(context: vscode.ExtensionContext) {
         return { script: scriptMapping, targets };
     }
     
-    // Validate component type
-    async function validateComponent(client: QrcClient, componentName: string): Promise<boolean> {
+    // Validate multiple components at once for a core
+    async function validateComponents(client: QrcClient, componentNames: string[]): Promise<{[componentName: string]: {valid: boolean, error?: string, type?: string}}> {
+        const results: {[componentName: string]: {valid: boolean, error?: string, type?: string}} = {};
+        
         try {
-            outputChannel.appendLine(`Validating component: "${componentName}"`);
+            outputChannel.appendLine(`Validating ${componentNames.length} components...`);
             
+            // Get all components from the core once
             const components = await client.getComponents();
             outputChannel.appendLine(`Retrieved ${components.length} components from the core`);
             
-            // Find the component by Name or ID, but don't log each check
-            const matchedComponent = components.find(comp => 
-                comp.Name === componentName || comp.ID === componentName
-            );
-            
-            if (!matchedComponent) {
-                outputChannel.appendLine(`Component "${componentName}" not found in the list of components`);
-                vscode.window.showErrorMessage(`Component "${componentName}" not found`);
-                return false;
-            }
-            
-            outputChannel.appendLine(`Found component "${componentName}" with type "${matchedComponent.Type}"`);
-            
             const validTypes = ['device_controller_script', 'control_script_2', 'scriptable_controls', 'device_controller_proxy'];
-            if (!validTypes.includes(matchedComponent.Type)) {
-                outputChannel.appendLine(`Component type "${matchedComponent.Type}" is not valid. Valid types: ${validTypes.join(', ')}`);
-                vscode.window.showErrorMessage(`Component "${componentName}" is not a valid script component type. Must be one of: ${validTypes.join(', ')}`);
-                return false;
+            
+            // Validate each component against the retrieved list
+            for (const componentName of componentNames) {
+                // Find the component by Name or ID
+                const matchedComponent = components.find(comp =>
+                    comp.Name === componentName || comp.ID === componentName
+                );
+                
+                if (!matchedComponent) {
+                    outputChannel.appendLine(`Component "${componentName}" not found in the list of components`);
+                    results[componentName] = {
+                        valid: false,
+                        error: `Component "${componentName}" not found`
+                    };
+                    continue;
+                }
+                
+                outputChannel.appendLine(`Found component "${componentName}" with type "${matchedComponent.Type}"`);
+                
+                if (!validTypes.includes(matchedComponent.Type)) {
+                    outputChannel.appendLine(`Component type "${matchedComponent.Type}" is not valid. Valid types: ${validTypes.join(', ')}`);
+                    results[componentName] = {
+                        valid: false,
+                        error: `Component "${componentName}" is not a valid script component type. Must be one of: ${validTypes.join(', ')}`,
+                        type: matchedComponent.Type
+                    };
+                    continue;
+                }
+                
+                // Component is valid
+                results[componentName] = {
+                    valid: true,
+                    type: matchedComponent.Type
+                };
+                outputChannel.appendLine(`Component "${componentName}" validation successful`);
             }
             
-            return true;
+            return results;
         } catch (err) {
-            outputChannel.appendLine(`Error validating component: ${err}`);
-            vscode.window.showErrorMessage(`Error validating component: ${err}`);
-            return false;
+            outputChannel.appendLine(`Error validating components: ${err}`);
+            // Return error for all components
+            for (const componentName of componentNames) {
+                results[componentName] = {
+                    valid: false,
+                    error: `Error validating component: ${err}`
+                };
+            }
+            return results;
         }
+    }
+
+    // Legacy function for backward compatibility (now uses the optimized version)
+    async function validateComponent(client: QrcClient, componentName: string): Promise<boolean> {
+        const results = await validateComponents(client, [componentName]);
+        const result = results[componentName];
+        
+        if (!result.valid && result.error) {
+            vscode.window.showErrorMessage(result.error);
+        }
+        
+        return result.valid;
     }
     
     // Deploy script to Q-SYS Core
@@ -465,37 +778,441 @@ export function activate(context: vscode.ExtensionContext) {
             return false;
         }
     }
+
+    // Optimized deployment function with connection pooling and cancellation support
+    async function deployScriptOptimized(
+        filePath: string,
+        targets: Array<{core: QSysCore, componentNames: string[]}>,
+        connectionPool: ConnectionPoolManager,
+        cancellationToken?: DeploymentCancellationToken,
+        progress?: vscode.Progress<{message?: string, increment?: number}>
+    ): Promise<DeploymentResult[]> {
+        const results: DeploymentResult[] = [];
+        const settings = getSettings();
+        
+        // Check for cancellation at start
+        try {
+            cancellationToken?.throwIfCancelled();
+        } catch (error) {
+            // Return cancelled results for all targets
+            for (const target of targets) {
+                for (const componentName of target.componentNames) {
+                    results.push({
+                        success: false,
+                        core: target.core,
+                        componentName,
+                        cancelled: true,
+                        error: 'Deployment cancelled by user'
+                    });
+                }
+            }
+            return results;
+        }
+        
+        // Group targets by core to optimize connection reuse
+        const coreGroups = new Map<string, {core: QSysCore, components: string[]}>();
+        
+        for (const target of targets) {
+            const coreKey = `${target.core.ip}:${target.core.name}`;
+            if (!coreGroups.has(coreKey)) {
+                coreGroups.set(coreKey, {
+                    core: target.core,
+                    components: []
+                });
+            }
+            coreGroups.get(coreKey)!.components.push(...target.componentNames);
+        }
+
+        const totalComponents = Array.from(coreGroups.values()).reduce((sum, group) => sum + group.components.length, 0);
+        outputChannel.appendLine(`\n--- Deployment Starting ---`);
+        outputChannel.appendLine(`File: ${filePath}`);
+        outputChannel.appendLine(`Cores to deploy to: ${coreGroups.size}`);
+        outputChannel.appendLine(`Total components: ${totalComponents}`);
+
+        progress?.report({ increment: 10, message: "Reading script content..." });
+
+        // Read script content once
+        let scriptContent: string;
+        try {
+            cancellationToken?.throwIfCancelled();
+            const document = await vscode.workspace.openTextDocument(filePath);
+            scriptContent = document.getText();
+            outputChannel.appendLine(`Script content length: ${scriptContent.length} characters`);
+        } catch (err) {
+            if (cancellationToken?.isCancelled) {
+                // Return cancelled results for all targets
+                for (const target of targets) {
+                    for (const componentName of target.componentNames) {
+                        results.push({
+                            success: false,
+                            core: target.core,
+                            componentName,
+                            cancelled: true,
+                            error: 'Deployment cancelled by user'
+                        });
+                    }
+                }
+                return results;
+            }
+            
+            outputChannel.appendLine(`Error reading script file: ${err}`);
+            // Return failure results for all targets
+            for (const target of targets) {
+                for (const componentName of target.componentNames) {
+                    results.push({
+                        success: false,
+                        core: target.core,
+                        componentName,
+                        error: `Failed to read script file: ${err}`
+                    });
+                }
+            }
+            return results;
+        }
+
+        // Deploy to each core group
+        let completedComponents = 0;
+        const coreArray = Array.from(coreGroups.entries());
+        
+        for (let coreIndex = 0; coreIndex < coreArray.length; coreIndex++) {
+            const [coreKey, group] = coreArray[coreIndex];
+            const { core, components } = group;
+            let client: QrcClient | null = null;
+            let coreSkipped = false;
+            let skipReason = '';
+
+            // Check for cancellation before each core
+            try {
+                cancellationToken?.throwIfCancelled();
+            } catch (error) {
+                // Mark remaining components as cancelled
+                for (const componentName of components) {
+                    results.push({
+                        success: false,
+                        core,
+                        componentName,
+                        cancelled: true,
+                        error: 'Deployment cancelled by user'
+                    });
+                }
+                continue;
+            }
+
+            try {
+                outputChannel.appendLine(`\n--- Connecting to ${core.name} (${core.ip}) ---`);
+                progress?.report({
+                    increment: 0,
+                    message: `Connecting to ${core.name}...`
+                });
+                
+                // Get connection from pool (with timeout and cancellation handling)
+                client = await connectionPool.getConnection(core, cancellationToken);
+                
+                outputChannel.appendLine(`Connected successfully to ${core.name}`);
+                progress?.report({
+                    increment: 0,
+                    message: `Validating components on ${core.name}...`
+                });
+
+                // Validate all components for this core at once (optimization)
+                outputChannel.appendLine(`Validating all ${components.length} components for ${core.name}...`);
+                const validationResults = await validateComponents(client, components);
+                
+                // Deploy to all components on this core
+                for (let compIndex = 0; compIndex < components.length; compIndex++) {
+                    const componentName = components[compIndex];
+                    
+                    // Check for cancellation before each component
+                    try {
+                        cancellationToken?.throwIfCancelled();
+                    } catch (error) {
+                        results.push({
+                            success: false,
+                            core,
+                            componentName,
+                            cancelled: true,
+                            error: 'Deployment cancelled by user'
+                        });
+                        continue;
+                    }
+                    
+                    if (coreSkipped) {
+                        // Skip remaining components for this core
+                        results.push({
+                            success: false,
+                            core,
+                            componentName,
+                            skipped: true,
+                            skipReason
+                        });
+                        continue;
+                    }
+
+                    try {
+                        outputChannel.appendLine(`Deploying to component: ${componentName}`);
+                        progress?.report({
+                            increment: 0,
+                            message: `Deploying to ${componentName} on ${core.name}...`
+                        });
+                        
+                        // Check validation result (already validated in batch)
+                        const validationResult = validationResults[componentName];
+                        if (!validationResult.valid) {
+                            results.push({
+                                success: false,
+                                core,
+                                componentName,
+                                error: validationResult.error || 'Component validation failed'
+                            });
+                            completedComponents++;
+                            const progressPercent = Math.round((completedComponents / totalComponents) * 80) + 20; // 20-100%
+                            progress?.report({
+                                increment: 0,
+                                message: `Component validation failed: ${componentName}`
+                            });
+                            continue;
+                        }
+
+                        // Deploy script
+                        await client.setScript(componentName, scriptContent);
+                        
+                        outputChannel.appendLine(`Successfully deployed to ${componentName} on ${core.name}`);
+                        results.push({
+                            success: true,
+                            core,
+                            componentName
+                        });
+
+                        completedComponents++;
+                        const progressPercent = Math.round((completedComponents / totalComponents) * 80) + 20; // 20-100%
+                        progress?.report({
+                            increment: 0,
+                            message: `Deployed ${completedComponents}/${totalComponents} components`
+                        });
+
+                    } catch (err) {
+                        if (cancellationToken?.isCancelled) {
+                            results.push({
+                                success: false,
+                                core,
+                                componentName,
+                                cancelled: true,
+                                error: 'Deployment cancelled by user'
+                            });
+                        } else {
+                            outputChannel.appendLine(`Failed to deploy to ${componentName} on ${core.name}: ${err}`);
+                            results.push({
+                                success: false,
+                                core,
+                                componentName,
+                                error: `${err}`
+                            });
+                        }
+                        
+                        completedComponents++;
+                        const progressPercent = Math.round((completedComponents / totalComponents) * 80) + 20; // 20-100%
+                        progress?.report({
+                            increment: 0,
+                            message: `Failed: ${componentName} (${completedComponents}/${totalComponents})`
+                        });
+                    }
+                }
+
+            } catch (err) {
+                // Check if this is a cancellation error
+                const isCancelled = cancellationToken?.isCancelled || (err instanceof Error && err.message.includes('cancelled'));
+                
+                if (isCancelled) {
+                    outputChannel.appendLine(`Connection to ${core.name} cancelled by user`);
+                    // Mark all components for this core as cancelled
+                    for (const componentName of components) {
+                        results.push({
+                            success: false,
+                            core,
+                            componentName,
+                            cancelled: true,
+                            error: 'Deployment cancelled by user'
+                        });
+                        completedComponents++;
+                    }
+                } else {
+                    outputChannel.appendLine(`Failed to connect to ${core.name}: ${err}`);
+                    
+                    // Check if this is a timeout error
+                    const isTimeout = err instanceof Error && err.message.includes('timeout');
+                    if (isTimeout) {
+                        coreSkipped = true;
+                        skipReason = `Connection timeout after ${settings.connectionTimeout}ms`;
+                        outputChannel.appendLine(`Skipping all remaining deployments to ${core.name} due to timeout`);
+                    }
+
+                    // Mark all components for this core as failed/skipped
+                    for (const componentName of components) {
+                        results.push({
+                            success: false,
+                            core,
+                            componentName,
+                            error: isTimeout ? undefined : `${err}`,
+                            skipped: isTimeout,
+                            skipReason: isTimeout ? skipReason : undefined
+                        });
+                        completedComponents++;
+                    }
+                }
+
+                // Close the failed connection
+                if (client) {
+                    connectionPool.closeConnection(core);
+                }
+            }
+        }
+
+        outputChannel.appendLine(`\n--- Deployment Complete ---`);
+        return results;
+    }
+
+    // Deploy with progress notification and cancellation support
+    async function deployWithProgress<T>(
+        title: string,
+        deploymentFunction: (
+            cancellationToken: DeploymentCancellationToken,
+            progress: vscode.Progress<{message?: string, increment?: number}>
+        ) => Promise<T>
+    ): Promise<T> {
+        const cancellationToken = new DeploymentCancellationToken();
+        
+        return vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: title,
+            cancellable: true
+        }, async (progress, token) => {
+            // Handle VSCode's cancellation token
+            token.onCancellationRequested(() => {
+                outputChannel.appendLine('Deployment cancellation requested by user');
+                cancellationToken.cancel();
+            });
+            
+            progress.report({ increment: 0, message: "Initializing deployment..." });
+            
+            try {
+                return await deploymentFunction(cancellationToken, progress);
+            } catch (error) {
+                if (cancellationToken.isCancelled) {
+                    outputChannel.appendLine('Deployment cancelled by user');
+                    vscode.window.showInformationMessage('Q-SYS deployment cancelled by user');
+                    throw new Error('Deployment cancelled');
+                }
+                throw error;
+            }
+        });
+    }
+
+    // Helper function to display deployment results
+    function displayDeploymentResults(results: DeploymentResult[]): void {
+        const successful = results.filter(r => r.success);
+        const failed = results.filter(r => !r.success && !r.skipped);
+        const skipped = results.filter(r => r.skipped);
+
+        outputChannel.appendLine(`\n--- Deployment Summary ---`);
+        outputChannel.appendLine(`Successful: ${successful.length}`);
+        outputChannel.appendLine(`Failed: ${failed.length}`);
+        outputChannel.appendLine(`Skipped: ${skipped.length}`);
+
+        if (successful.length > 0) {
+            outputChannel.appendLine(`\nSuccessful deployments:`);
+            successful.forEach(r => {
+                outputChannel.appendLine(`  ✓ ${r.componentName} on ${r.core.name}`);
+            });
+        }
+
+        if (failed.length > 0) {
+            outputChannel.appendLine(`\nFailed deployments:`);
+            failed.forEach(r => {
+                outputChannel.appendLine(`  ✗ ${r.componentName} on ${r.core.name}: ${r.error}`);
+            });
+        }
+
+        if (skipped.length > 0) {
+            outputChannel.appendLine(`\nSkipped deployments:`);
+            skipped.forEach(r => {
+                outputChannel.appendLine(`  ⚠ ${r.componentName} on ${r.core.name}: ${r.skipReason}`);
+            });
+        }
+
+        // Show user notification
+        if (successful.length > 0 && failed.length === 0 && skipped.length === 0) {
+            vscode.window.showInformationMessage(`Script deployed successfully to all ${successful.length} targets.`);
+        } else if (successful.length > 0 && (failed.length > 0 || skipped.length > 0)) {
+            const message = `Script deployed to ${successful.length} targets. ${failed.length} failed, ${skipped.length} skipped.`;
+            vscode.window.showWarningMessage(message);
+        } else if (successful.length === 0 && (failed.length > 0 || skipped.length > 0)) {
+            const message = `Script deployment failed on all targets. ${failed.length} failed, ${skipped.length} skipped due to timeouts.`;
+            vscode.window.showErrorMessage(message);
+        } else {
+            vscode.window.showInformationMessage('No deployments were attempted.');
+        }
+    }
     
     // Helper types for selection QuickPicks
     interface CoreQuickPickItem extends vscode.QuickPickItem {
         core: QSysCore;
-        isSelectAll?: boolean;
     }
-    
+
     interface ComponentQuickPickItem extends vscode.QuickPickItem {
         componentName: string;
-        isSelectAll?: boolean;
     }
     
     // Helper function to show multi-select QuickPick for cores
     async function showCoreSelectionQuickPick(coreItems: CoreQuickPickItem[], canPickMany: boolean = false) {
-        return vscode.window.showQuickPick<CoreQuickPickItem>([
-            { label: '$(check-all) Select All', picked: false, isSelectAll: true, core: null as any },
-            ...coreItems
-        ], {
-            placeHolder: 'Select Q-SYS Cores to deploy to',
-            canPickMany
+        if (!canPickMany) {
+            // Single selection - don't show Select All option
+            return vscode.window.showQuickPick<CoreQuickPickItem>(coreItems, {
+                placeHolder: 'Select Q-SYS Core to deploy to'
+            });
+        }
+
+        // Multi-selection using VSCode's built-in Select All functionality
+        const quickPick = vscode.window.createQuickPick<CoreQuickPickItem>();
+        quickPick.items = coreItems;
+        quickPick.canSelectMany = true;
+        quickPick.placeholder = 'Select Q-SYS Cores to deploy to (use the checkbox at the top to select all)';
+
+        return new Promise<CoreQuickPickItem[] | undefined>((resolve) => {
+            quickPick.onDidAccept(() => {
+                const selection = quickPick.selectedItems;
+                quickPick.hide();
+                resolve(selection.length > 0 ? [...selection] : undefined);
+            });
+
+            quickPick.onDidHide(() => {
+                quickPick.dispose();
+                resolve(undefined);
+            });
+
+            quickPick.show();
         });
     }
 
     // Helper function to show multi-select QuickPick for components
     async function showComponentSelectionQuickPick(componentItems: ComponentQuickPickItem[]) {
-        return vscode.window.showQuickPick<ComponentQuickPickItem>([
-            { label: '$(check-all) Select All', picked: false, isSelectAll: true, componentName: '' },
-            ...componentItems
-        ], {
-            placeHolder: 'Select components to deploy to',
-            canPickMany: true
+        const quickPick = vscode.window.createQuickPick<ComponentQuickPickItem>();
+        quickPick.items = componentItems;
+        quickPick.canSelectMany = true;
+        quickPick.placeholder = 'Select components to deploy to (use the checkbox at the top to select all)';
+
+        return new Promise<ComponentQuickPickItem[] | undefined>((resolve) => {
+            quickPick.onDidAccept(() => {
+                const selection = quickPick.selectedItems;
+                quickPick.hide();
+                resolve(selection.length > 0 ? [...selection] : undefined);
+            });
+
+            quickPick.onDidHide(() => {
+                quickPick.dispose();
+                resolve(undefined);
+            });
+
+            quickPick.show();
         });
     }
     
@@ -534,12 +1251,8 @@ export function activate(context: vscode.ExtensionContext) {
                 return; // User cancelled
             }
             
-            if (selectedCoreItems.some((item: CoreQuickPickItem) => item.isSelectAll)) {
-                // "Select All" was chosen
-                selectedCores = scriptMappings.targets.map(target => target.core);
-            } else {
-                selectedCores = selectedCoreItems.map((item: CoreQuickPickItem) => item.core);
-            }
+            // Process selected cores (no custom Select All item to filter out)
+            selectedCores = selectedCoreItems.map((item: CoreQuickPickItem) => item.core);
             
             // Filter targets to only include selected cores
             const filteredTargets = scriptMappings.targets.filter(target => 
@@ -572,12 +1285,8 @@ export function activate(context: vscode.ExtensionContext) {
             
             let selectedComponentNames: string[] = [];
             
-            if (selectedComponentItems.some((item: ComponentQuickPickItem) => item.isSelectAll)) {
-                // "Select All" was chosen
-                selectedComponentNames = allComponentItems.map(item => item.componentName);
-            } else {
-                selectedComponentNames = selectedComponentItems.map((item: ComponentQuickPickItem) => item.componentName);
-            }
+            // Process selected components (no custom Select All item to filter out)
+            selectedComponentNames = selectedComponentItems.map((item: ComponentQuickPickItem) => item.componentName);
             
             // Build deploy targets
             deployTargets = filteredTargets.map(target => {
@@ -603,7 +1312,8 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
             
-            const selectedCore = selectedCoreItem.core;
+            // Handle single selection (not array)
+            const selectedCore = Array.isArray(selectedCoreItem) ? selectedCoreItem[0].core : selectedCoreItem.core;
             
             // Ask for component name
             const componentName = await vscode.window.showInputBox({
@@ -621,30 +1331,19 @@ export function activate(context: vscode.ExtensionContext) {
             }];
         }
         
-        // Deploy to all selected targets
-        let successCount = 0;
-        let failCount = 0;
-        
-        for (const target of deployTargets) {
-            for (const componentName of target.componentNames) {
-                const success = await deployScript(filePath, target.core, componentName);
-                if (success) {
-                    successCount++;
-                } else {
-                    failCount++;
-                }
+        // Deploy to all selected targets using optimized deployment with progress modal
+        const results = await deployWithProgress(
+            "Q-SYS Script Deployment",
+            async (cancellationToken, progress) => {
+                return await deployScriptOptimized(filePath, deployTargets, connectionPool, cancellationToken, progress);
             }
-        }
+        );
+        displayDeploymentResults(results);
         
-        if (successCount > 0 && failCount === 0) {
-            vscode.window.showInformationMessage(`Script deployed successfully to all ${successCount} targets.`);
-        } else if (successCount > 0 && failCount > 0) {
-            vscode.window.showWarningMessage(`Script deployed to ${successCount} targets, but failed on ${failCount} targets.`);
-        } else if (successCount === 0 && failCount > 0) {
-            vscode.window.showErrorMessage(`Script deployment failed on all ${failCount} targets.`);
-        } else {
-            vscode.window.showInformationMessage('No deployments were attempted.');
-        }
+        // Close connections after deployment
+        connectionPool.closeAllConnections();
+        
+        const successCount = results.filter(r => r.success).length;
         
         // Ask if user wants to save this mapping (only for new mappings)
         if (!scriptMappings && successCount > 0) {
@@ -663,7 +1362,8 @@ export function activate(context: vscode.ExtensionContext) {
                 scripts.push({
                     filePath: normalizedFilePath,
                     targets: deployTargets.map(target => ({
-                        coreName: target.core.name,
+                        coreNames: [target.core.name],
+                        coreName: target.core.name, // Keep for backward compatibility
                         components: target.componentNames
                     }))
                 });
@@ -674,6 +1374,108 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
     
+    
+    // Command: Deploy to All
+    const deployToAllCommand = vscode.commands.registerCommand('qsys-deploy.deployToAll', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor');
+            return;
+        }
+        
+        const filePath = editor.document.uri.fsPath;
+        const scriptMappings = findScriptMappings(filePath);
+        
+        if (!scriptMappings) {
+            vscode.window.showErrorMessage('No script mapping found for this file. Please configure script mappings in settings.');
+            return;
+        }
+        
+        // Deploy to ALL defined script mappings using optimized deployment with progress modal
+        outputChannel.appendLine(`\n--- Deploy to All: Starting deployment for ${filePath} ---`);
+        
+        const results = await deployWithProgress(
+            "Q-SYS Deploy to All",
+            async (cancellationToken, progress) => {
+                return await deployScriptOptimized(filePath, scriptMappings.targets, connectionPool, cancellationToken, progress);
+            }
+        );
+        displayDeploymentResults(results);
+        
+        // Close connections after deployment
+        connectionPool.closeAllConnections();
+        
+        const successCount = results.filter(r => r.success).length;
+        const failCount = results.filter(r => !r.success && !r.skipped).length;
+        const skippedCount = results.filter(r => r.skipped).length;
+        
+        outputChannel.appendLine(`--- Deploy to All: Completed (${successCount} success, ${failCount} failed, ${skippedCount} skipped) ---`);
+    });
+    
+    // Command: Quick Deploy
+    const quickDeployCommand = vscode.commands.registerCommand('qsys-deploy.quickDeploy', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor');
+            return;
+        }
+        
+        const filePath = editor.document.uri.fsPath;
+        const scriptMappings = findScriptMappings(filePath);
+        
+        if (!scriptMappings) {
+            vscode.window.showErrorMessage('No script mapping found for this file. Please configure script mappings in settings.');
+            return;
+        }
+        
+        // Find targets with quickDeploy: true
+        const quickDeployTargets: Array<{core: QSysCore, componentNames: string[]}> = [];
+        const settings = getSettings();
+        
+        // Use the original script mapping targets, not the processed ones
+        for (const target of scriptMappings.script.targets) {
+            if (target.quickDeploy === true) {
+                // Handle both new coreNames array and legacy coreName
+                const coreNamesToProcess = target.coreNames || (target.coreName ? [target.coreName] : []);
+                
+                for (const coreName of coreNamesToProcess) {
+                    const core = settings.cores.find(c => c.name === coreName);
+                    if (core) {
+                        quickDeployTargets.push({
+                            core,
+                            componentNames: target.components
+                        });
+                    }
+                }
+            }
+        }
+        
+        if (quickDeployTargets.length === 0) {
+            vscode.window.showInformationMessage('No quick deploy targets found. Set "quickDeploy: true" in your script mappings to enable quick deploy.');
+            return;
+        }
+        
+        // Deploy to quick deploy targets using optimized deployment with progress modal
+        outputChannel.appendLine(`\n--- Quick Deploy: Starting deployment for ${filePath} ---`);
+        outputChannel.appendLine(`Found ${quickDeployTargets.length} quick deploy targets`);
+        
+        const results = await deployWithProgress(
+            "Q-SYS Quick Deploy",
+            async (cancellationToken, progress) => {
+                return await deployScriptOptimized(filePath, quickDeployTargets, connectionPool, cancellationToken, progress);
+            }
+        );
+        displayDeploymentResults(results);
+        
+        // Close connections after deployment
+        connectionPool.closeAllConnections();
+        
+        const successCount = results.filter(r => r.success).length;
+        const failCount = results.filter(r => !r.success && !r.skipped).length;
+        const skippedCount = results.filter(r => r.skipped).length;
+        
+        outputChannel.appendLine(`--- Quick Deploy: Completed (${successCount} success, ${failCount} failed, ${skippedCount} skipped) ---`);
+    });
     
     // Command: Test connection
     const testConnectionCommand = vscode.commands.registerCommand('qsys-deploy.testConnection', async () => {
@@ -702,7 +1504,7 @@ export function activate(context: vscode.ExtensionContext) {
         outputChannel.show();
         outputChannel.appendLine(`\n--- Testing connection to ${selectedCore.core.name} (${selectedCore.core.ip}) ---`);
         
-        const client = new QrcClient(selectedCore.core.ip, 1710, outputChannel);
+        const client = new QrcClient(selectedCore.core.ip, 1710, outputChannel, settings.connectionTimeout);
         
         try {
             // Connect to the core
@@ -759,12 +1561,20 @@ export function activate(context: vscode.ExtensionContext) {
                 : settings.autoDeployOnSave;
             
             if (autoDeployForScript) {
-                // Deploy to all targets
-                for (const target of scriptMappings.targets) {
-                    for (const componentName of target.componentNames) {
-                        await deployScript(filePath, target.core, componentName);
-                    }
-                }
+                // Deploy to all targets using optimized deployment (no progress modal for auto-deploy)
+                outputChannel.appendLine(`\n--- Auto-Deploy: Starting deployment for ${filePath} ---`);
+                const cancellationToken = new DeploymentCancellationToken(); // Create token but no UI
+                const results = await deployScriptOptimized(filePath, scriptMappings.targets, connectionPool, cancellationToken);
+                
+                // Log results but don't show UI notifications for auto-deploy
+                const successCount = results.filter(r => r.success).length;
+                const failCount = results.filter(r => !r.success && !r.skipped).length;
+                const skippedCount = results.filter(r => r.skipped).length;
+                
+                outputChannel.appendLine(`--- Auto-Deploy: Completed (${successCount} success, ${failCount} failed, ${skippedCount} skipped) ---`);
+                
+                // Close connections after auto-deploy
+                connectionPool.closeAllConnections();
             }
         }
     });
@@ -772,6 +1582,8 @@ export function activate(context: vscode.ExtensionContext) {
     // Register all commands and event handlers
     context.subscriptions.push(
         deployCurrentScriptCommand,
+        deployToAllCommand,
+        quickDeployCommand,
         testConnectionCommand,
         showDebugOutputCommand,
         onSaveHandler

@@ -2,7 +2,7 @@
   "name": "qsys-deploy-vscode",
   "displayName": "Q-SYS Lua Script Deployment",
   "description": "Deploy Lua scripts to Q-SYS Core or Designer",
-  "version": "0.3.2",
+  "version": "0.4.1",
   "publisher": "WhiteLabelAV",
   "repository": {
     "type": "git",
@@ -24,6 +24,14 @@
         "title": "Q-SYS: Deploy Current Script"
       },
       {
+        "command": "qsys-deploy.deployToAll",
+        "title": "Q-SYS: Deploy to All"
+      },
+      {
+        "command": "qsys-deploy.quickDeploy",
+        "title": "Q-SYS: Quick Deploy"
+      },
+      {
         "command": "qsys-deploy.testConnection",
         "title": "Q-SYS: Test Core Connection"
       },
@@ -36,6 +44,16 @@
       {
         "command": "qsys-deploy.deployCurrentScript",
         "key": "ctrl+alt+d",
+        "when": "editorLangId == lua"
+      },
+      {
+        "command": "qsys-deploy.deployToAll",
+        "key": "ctrl+alt+shift+d",
+        "when": "editorLangId == lua"
+      },
+      {
+        "command": "qsys-deploy.quickDeploy",
+        "key": "ctrl+alt+q",
         "when": "editorLangId == lua"
       }
     ],
@@ -90,9 +108,21 @@
                 "items": {
                   "type": "object",
                   "properties": {
+                    "coreNames": {
+                      "type": "array",
+                      "description": "Names of the cores to deploy to",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
                     "coreName": {
                       "type": "string",
-                      "description": "Name of the core to deploy to"
+                      "description": "Legacy: Name of the core to deploy to (use coreNames instead)"
+                    },
+                    "quickDeploy": {
+                      "type": "boolean",
+                      "description": "Enable Quick Deploy functionality for this target",
+                      "default": false
                     },
                     "components": {
                       "type": "array",
@@ -110,6 +140,13 @@
               }
             }
           }
+        },
+        "qsys-deploy.connectionTimeout": {
+          "type": "number",
+          "default": 10000,
+          "description": "Connection timeout in milliseconds (default: 10 seconds)",
+          "minimum": 1000,
+          "maximum": 60000
         }
       }
     }
