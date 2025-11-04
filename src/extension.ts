@@ -214,7 +214,8 @@ class QrcClient {
         // Scan through the buffer looking for message boundaries
         while (currentPosition < buffer.length) {
             // Look for NULL character or newline as message delimiter
-            if (buffer[currentPosition] === 0 || buffer[currentPosition] === 10) {
+            // if (buffer[currentPosition] === 0 || buffer[currentPosition] === 10) { //End of message delimiter is null character.  QSYS 10.0 send newline on valid JSON messages.
+            if (buffer[currentPosition] === 0 ) {
                 if (currentPosition > messageStart) {
                     // Extract the message
                     const messageBuffer = buffer.slice(messageStart, currentPosition);
@@ -291,6 +292,7 @@ class QrcClient {
             };
             
             const commandStr = JSON.stringify(command);
+            console.log(`Sending command: ${commandStr}`);
             this.outputChannel.appendLine(`Sending command: ${commandStr}`);
             
             this.responseCallbacks.set(id, (response) => {
